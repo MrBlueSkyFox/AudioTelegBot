@@ -13,8 +13,9 @@ from telegram.ext import (
 from telegram.ext import messagequeue as mq
 from telegram.utils.request import Request
 
-from db_module import Base, User, ImageMessage
+from db_module import AudioMessage, Base, User, ImageMessage
 from face_detector import FaceDetector
+from audio_convertor import AudioConvertor
 
 DIR_MAIN = os.getcwd()
 DATA_DIR = os.path.join(DIR_MAIN, "data")
@@ -37,9 +38,9 @@ for log_name in loggers:
     logger.setLevel(DEBUG)
     filename = os.path.join(LOG_DIR, f"{log_name}.log")
     print(f"Filename :{filename}")
-    fh = logging.handlers.RotatingFileHandler(
-        filename, maxBytes=1024 * 1024 * 40, backupCount=2
-    )
+    fh = logging.handlers.RotatingFileHandler(filename,
+                                              maxBytes=1024 * 1024 * 40,
+                                              backupCount=2)
     formatter = logging.Formatter("%(levelname)s: %(asctime)s %(message)s")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
@@ -60,7 +61,7 @@ class TestBot(telegram.bot.Bot):
         Base.metadata.create_all(bind=connection.engine)
         self.session = session()
         self.face_detector = FaceDetector(FACE_DETECTION_XML_PATH)
-
+        self.audio_convertor = AudioConvertor()
         self.upd = Updater(bot=self, use_context=True)
         self.dp = self.upd.dispatcher
         self.dp.add_handler(MessageHandler(Filters.photo, self.image_handler))
@@ -74,19 +75,33 @@ class TestBot(telegram.bot.Bot):
         user_id = update.message.chat_id
         username = update.message.from_user.username
         logger.info(f"get voice from user: {user_id}")
+        user = self.if_user_exists(user_id)
+        if not user:
+            user = User(user_id=user_id, username=username)
+            self.session.add(user)
 
+        cnt = self.session.query(AudioMessage).filter(
+            AudioMessage.user == User.user_id).count()
+
+        logger.info(f"cnt: {cnt}")
         file_id = update.message.voice.file_id
-        audio_name = f"{user_id}_{file_id}.ogg"
-        audio_path = os.path.join(AUDIO_DIR, audio_name)
-        with open(audio_path, "wb") as f:
+        audio_name_in = f"{user_id}_audio_message_{cnt}.ogg"
+        audio_name_out = f"{user_id}_audio_message_{cnt}.wav"
+        audio_path_in = os.path.join(AUDIO_DIR, audio_name_in)
+        audio_path_out = os.path.join(AUDIO_DIR, audio_name_out)
+        with open(audio_path_in, "wb") as f:
             context.bot.get_file(file_id).download(out=f)
-        logger.info(f"end voice from user: {user_id}")
 
-        self.send_message(user_id, text="end voice")
+        self.audio_convertor.convert(audio_path_in, audio_path_out)
+        self.session.add(
+            AudioMessage(user=user.user_id, audio_path=audio_path_out))
+        self.session.commit()
+        msg_succ = "Your audio message has been received"
+        msg_count = f"You send us {cnt} audio messages"
+        self.send_message(user_id, text=msg_succ)
+        self.send_message(user_id, text=msg_count)
 
     def image_handler(self, update, context):
-        # import code
-        # code.interact(local=locals())
         user_id = update.message.chat_id
         username = update.message.from_user.username
         logger.info(f"get image from user: {user_id}")
@@ -103,15 +118,12 @@ class TestBot(telegram.bot.Bot):
             if not user:
                 user = User(user_id=user_id, username=username)
                 self.session.add(user)
-            self.session.add(
-                ImageMessage(user=user.user_id, img_path=img_path)
-            )
+            self.session.add(ImageMessage(user=user.user_id,
+                                          img_path=img_path))
             self.session.commit()
             self.send_message(user_id, text=msg)
         else:
             os.remove(img_path)
-        # file = context.bot.getFile(update.message.photo[-1].file_id).download(out=f)
-        logger.info(f"end image from user: {user_id}")
 
     def if_user_exists(self, user_id):
         user = self.session.query(User).filter(User.user_id == user_id).first()
@@ -136,7 +148,7 @@ class TestBot(telegram.bot.Bot):
 
 
 if __name__ == "__main__":
-    token = "2102450191:AAFDknFs1wm0IFfr3EmYbhDGhRUBwFrgx3U"
+    token = ""
     q = mq.MessageQueue(all_burst_limit=20, all_time_limit_ms=1500)
     request = Request(con_pool_size=8)
     test_bot = TestBot(token, request=request, mqueue=q)
